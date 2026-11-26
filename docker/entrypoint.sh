@@ -76,7 +76,8 @@ log "starting dropbear on :22"
 sleep 2
 if pgrep -x dropbear >/dev/null 2>&1; then
   log "dropbear up (pid $(pgrep -x dropbear | tr '\n' ' '))"
-  log "authorized_keys: $(cut -d' ' -f1,3 /root/.ssh/authorized_keys 2>/dev/null | tr '\n' ' ')"
+  # 打印完整指纹，方便和客户端 ssh-keygen -lf 对照
+  log "authorized_keys fingerprints: $(ssh-keygen -lf /root/.ssh/authorized_keys 2>/dev/null | cut -d' ' -f2 | tr '\n' ' ')"
 else
   log "dropbear failed to start"
 fi
