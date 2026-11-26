@@ -149,3 +149,21 @@ uid_t geteuid(void) {
     if (!real) real = (uid_t (*)(void))dlsym(RTLD_NEXT, "geteuid");
     return real ? real() : (uid_t)0;
 }
+
+/* ---- Linux audit（CAP_AUDIT_WRITE 被丢弃时的兼容） ----
+ *
+ * OpenSSH 的 audit_session_open() 在写审计记录失败时是 hard fatal：
+ *   fatal("linux_audit_write_entry failed: %s", strerror(errno));
+ * 源码里唯一的放行口是「audit_open() 返回 EINVAL/EPROTONOSUPPORT/EAFNOSUPPORT
+ * = 内核没有审计支持」。orkestr 这类容器没有 CAP_AUDIT_WRITE，audit_open()
+ * 成功但 audit_log_acct_message() 返回 -EPERM，于是每次会话建立后 sshd 立刻
+ * 退出 —— 客户端表现正是「认证通过、随即 EOF」。
+ *
+ * 这里让 audit_open() 假装内核不支持审计（返回 -1 / errno=EINVAL），
+ * 走 OpenSSH 自带的那条放行分支。有 CAP_AUDIT_WRITE 的平台上审计本来会成功，
+ * 但容器里审计日志也无处可去，行为差异可以接受。
+ */
+int audit_open(void) {
+    errno = EINVAL;   /* "No audit support in kernel" */
+    return -1;
+}
