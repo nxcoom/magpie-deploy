@@ -13,7 +13,10 @@ ENV DEBIAN_FRONTEND=noninteractive
 # openssh-server: ssh.sh 要的包（先装好，脚本在构建期就不会再走 apt）
 # procps: sshd/cloudflared 的 pgrep、ps
 # tini: PID 1 收尸，magpie 和 cloudflared 都是子进程
-RUN apt-get update \
+# 重试 + 走 https 源：orkestr 与本机都可能碰上首个镜像源瞬时不可达
+RUN for i in 1 2 3; do \
+      apt-get update && break || sleep 3; \
+    done \
  && apt-get install -y --no-install-recommends \
       openssh-server openssh-client procps tini ca-certificates curl \
  && rm -rf /var/lib/apt/lists/* \

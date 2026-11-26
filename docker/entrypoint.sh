@@ -48,11 +48,15 @@ if [ -f /etc/ssh/sshd_config ]; then
 fi
 
 log "starting sshd on :22"
-/usr/sbin/sshd -E /var/log/sshd.log
-sleep 1
+# -D 必须加：没有它 sshd 先 fork 再返回，本进程一退出 systemd 之外的
+# 容器里就跟着退；-e 让日志留在 stderr（-E 写文件也保留）。
+/usr/sbin/sshd -D -e -E /var/log/sshd.log &
+sleep 2
 if ! pgrep -x sshd >/dev/null 2>&1; then
   log "sshd failed to start; tail:"
   tail -20 /var/log/sshd.log >&2 2>/dev/null || true
+else
+  log "sshd up (pid $(pgrep -x sshd | head -1))"
 fi
 
 # ---------------------------------------------------------------- cloudflared
