@@ -83,11 +83,30 @@ if [ -z "${MAGPIE_WEB_KEY:-}" ]; then
 fi
 export MAGPIE_WEB_KEY
 
-if [ -n "${MAGPIE_GATEWAY_KEY:-}" ]; then
-  # magpie 只拒绝 sk-magpie- 开头（它会自己生成那种）；
-  # 同名 key 已存在时会报错，忽略即可
-  magpie gateway-key add orkestr --key "$MAGPIE_GATEWAY_KEY" >/dev/null 2>&1 || true
-fi
+# gateway key 在网关起来之后补：/config 上可能还有滚动更新留下的旧 pod
+# 握着锁，启动期直接 add 会静默失败（第一次部署就踩到了）。所以放到后台，
+# 等网关应答后再试，结果写进日志而不是吞掉。
+ensure_gateway_key() {
+  [ -n "${MAGPIE_GATEWAY_KEY:-}" ] || return 0
+  for _ in $(seq 1 60); do
+    if magpie healthcheck --addr "$MAGPIE_ADDR" >/dev/null 2>&1; then
+      if magpie gateway-key list 2>/dev/null | grep -q ' orkestr '; then
+        log "gateway key orkestr already present"
+        return 0
+      fi
+      # magpie 拒绝以 sk-magpie- 开头的自有 key（那是它自己生成的形状）
+      if out=$(magpie gateway-key add orkestr --key "$MAGPIE_GATEWAY_KEY" 2>&1); then
+        log "gateway key orkestr created"
+      else
+        log "gateway key add failed: $out"
+      fi
+      return 0
+    fi
+    sleep 2
+  done
+  log "gateway key: gateway never answered at $MAGPIE_ADDR"
+}
+ensure_gateway_key &
 
 log "magpie gateway on $MAGPIE_ADDR, page on 0.0.0.0:$PORT"
 log "page link: https://<your-domain>/?k=$MAGPIE_WEB_KEY"
