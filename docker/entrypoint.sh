@@ -88,27 +88,31 @@ fi
 log "openssh sshd intentionally not started (dropbear serves :22)"
 
 # ---------------------------------------------------------------- cloudflared
-if [ -n "${CF_TUNNEL_TOKEN:-}" ]; then
-  log "starting cloudflared tunnel"
-  if [ -x /usr/local/lib/tunc/tunc ]; then
-    CF_BIN=/usr/local/lib/tunc/tunc
-  elif command -v cloudflared >/dev/null 2>&1; then
-    CF_BIN="$(command -v cloudflared)"
-  else
-    CF_BIN=""
-  fi
-  if [ -n "$CF_BIN" ]; then
-    # 同时写文件与 stdout：容器日志里才看得到 cloudflared 报的 origin 错误
-    # （隧道 ingress 由 Cloudflare 控制台托管，容器侧看不到规则，只能从
-    #  dial 失败的目标端口反推）。
-    TUNNEL_TOKEN="$CF_TUNNEL_TOKEN" setsid "$CF_BIN" tunnel --no-autoupdate run 2>&1 \
-      | tee -a /var/log/cloudflared.log &
-    log "cloudflared pid $! (log /var/log/cloudflared.log, also stdout)"
-  else
-    log "no cloudflared binary found; skipping tunnel"
-  fi
+# 支持多条隧道：CF_TUNNEL_TOKEN 是主 token，CF_TUNNEL_TOKEN_2..5 各跑一条。
+# 每条隧道的 ingress 由 Cloudflare 控制台托管，容器侧看不到规则。
+if [ -x /usr/local/lib/tunc/tunc ]; then
+  CF_BIN=/usr/local/lib/tunc/tunc
+elif command -v cloudflared >/dev/null 2>&1; then
+  CF_BIN="$(command -v cloudflared)"
 else
-  log "CF_TUNNEL_TOKEN unset; no tunnel"
+  CF_BIN=""
+fi
+
+if [ -z "$CF_BIN" ]; then
+  log "no cloudflared binary found; skipping tunnels"
+else
+  started=0
+  for n in "" _2 _3 _4 _5; do
+    var="CF_TUNNEL_TOKEN${n}"
+    eval "tok=\${$var:-}"
+    [ -n "$tok" ] || continue
+    # 同时写文件与 stdout：容器日志里才看得到 cloudflared 报的 origin 错误
+    TUNNEL_TOKEN="$tok" setsid "$CF_BIN" tunnel --no-autoupdate run 2>&1 \
+      | sed -u "s/^/[tunnel${n}] /" &
+    log "tunnel${n:- (primary)} started, pid $!"
+    started=$((started + 1))
+  done
+  [ "$started" -gt 0 ] || log "CF_TUNNEL_TOKEN unset; no tunnel"
 fi
 
 # ---------------------------------------------------------------- magpie
