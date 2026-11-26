@@ -47,51 +47,43 @@ if [ -f /etc/ssh/sshd_config ]; then
   grep -qE '^[[:space:]]*UsePAM[[:space:]]+no' /etc/ssh/sshd_config || echo "UsePAM no" >> /etc/ssh/sshd_config
 fi
 
-# 容器里 root 的 home 与权限都由我们自己铺，StrictModes 的属主检查只会添乱
-# （base 镜像 ENV HOME=/config/home 与 passwd 里的 /root 不一致时尤其容易踩）；
-# 公钥路径写死，避免相对路径按 HOME 解析到别处。
+# 容器里 root 的 home 与权限都由我们自己铺；OpenSSH 的 StrictModes 属主检查
+# 只会添乱（base 镜像 ENV HOME=/config/home 与 passwd 里的 /root 不一致）。
 mkdir -p /run/sshd /var/empty /root/.ssh
 chmod 0755 /run/sshd /var/empty
 chown root:root /root /root/.ssh
 chmod 0700 /root /root/.ssh
 
-# 权限分离用户：sshd 在发完 banner 后 fork 到 privsep 用户，缺了它就会在
-# 认证之前直接断开（表现正是「连上、看到版本号、然后 Connection closed」）。
-id sshd >/dev/null 2>&1 || useradd -r -g nogroup -d /var/empty -s /usr/sbin/nologin sshd 2>/dev/null || true
+# ---------------------------------------------------------------- SSH 服务端
+# 用 dropbear，不用 OpenSSH：OpenSSH 9+ 的权限分离在认证前必须
+# chroot("/run/sshd")，而 orkestr 的容器没有 CAP_SYS_CHROOT，连接会停在
+# 「拿到 banner 之后立刻 Connection closed」。ChrootDirectory none 和
+# UsePrivilegeSeparation no 都不生效（后者在 8.x 起已废弃）。
+# dropbear 不做 chroot，同样支持 authorized_keys 与 root 登录。
+mkdir -p /etc/dropbear
+DBHOST=/etc/dropbear/dropbear_ed25519_host_key
+[ -f "$DBHOST" ] || dropbearkey -t ed25519 -f "$DBHOST" >/dev/null 2>&1 || true
 
-# sshd 取「第一次出现的值生效」，所以 drop-in 要在主配置的 Include 之后
-# 才被读到；ssh.sh 生成的精简配置里可能没有 Include，这里补在最前面。
-mkdir -p /etc/ssh/sshd_config.d
-if ! grep -qE '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config.d' /etc/ssh/sshd_config 2>/dev/null; then
-  { echo "Include /etc/ssh/sshd_config.d/*.conf"; cat /etc/ssh/sshd_config 2>/dev/null; } > /tmp/sshd_config.new \
-    && mv /tmp/sshd_config.new /etc/ssh/sshd_config
-fi
+# dropbear 只读 ~/.ssh/authorized_keys（或 -A 指定的文件）；root 的 home 是 /root
+mkdir -p /root/.ssh && chmod 700 /root/.ssh
+touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys
 
-cat > /etc/ssh/sshd_config.d/99-glue.conf <<'CONF'
-PermitRootLogin yes
-PubkeyAuthentication yes
-AuthorizedKeysFile /root/.ssh/authorized_keys
-StrictModes no
-UsePAM no
-LogLevel VERBOSE
-CONF
-
-log "starting sshd on :22"
-# -D 必须加：没有它 sshd 先 fork 再返回，本进程一退出 systemd 之外的
-# 容器里就跟着退；-e 让日志留在 stderr（-E 写文件也保留）。
-: > /var/log/sshd.log
-/usr/sbin/sshd -D -E /var/log/sshd.log &
-SSHD_PID=$!
-# sshd 的日志同时打到容器 stdout：认证类问题只看容器日志就能定位
-( tail -F /var/log/sshd.log 2>/dev/null | sed -u 's/^/[sshd] /' ) &
+log "starting dropbear on :22"
+# -F 前台、-E 日志到 stderr、-s 禁密码、-w 不写 wtmp、-r 主机密钥、
+# -p 监听地址；日志同时进容器 stdout，认证问题只看容器日志就能定位。
+/usr/sbin/dropbear -F -E -s -w -r "$DBHOST" -p 0.0.0.0:22 \
+    -P /run/dropbear.pid 2>&1 | sed -u 's/^/[dropbear] /' &
 sleep 2
-if ! kill -0 "$SSHD_PID" 2>/dev/null; then
-  log "sshd failed to start; tail:"
-  tail -20 /var/log/sshd.log >&2 2>/dev/null || true
+if pgrep -x dropbear >/dev/null 2>&1; then
+  log "dropbear up (pid $(pgrep -x dropbear | tr '\n' ' '))"
+  log "authorized_keys: $(cut -d' ' -f1,3 /root/.ssh/authorized_keys 2>/dev/null | tr '\n' ' ')"
 else
-  log "sshd up (pid $SSHD_PID)"
-  log "authorized_keys now: $(cut -d' ' -f1,3 /root/.ssh/authorized_keys 2>/dev/null | tr '\n' ' ')"
+  log "dropbear failed to start"
 fi
+# OpenSSH 的 sshd 不在这里启动（见上面的 dropbear）：两者不能同时监听 22，
+# 而 sshd 在无 CAP_SYS_CHROOT 的容器里认证前就会挂。这里只保留 ssh.sh 配好
+# 的 sshd_config 供 `sshx` 菜单查看/改，实际服务端是 dropbear。
+log "openssh sshd intentionally not started (dropbear serves :22)"
 
 # ---------------------------------------------------------------- cloudflared
 if [ -n "${CF_TUNNEL_TOKEN:-}" ]; then

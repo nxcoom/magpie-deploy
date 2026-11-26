@@ -11,14 +11,18 @@ USER root
 ENV DEBIAN_FRONTEND=noninteractive
 
 # openssh-server: ssh.sh 要的包（先装好，脚本在构建期就不会再走 apt）
-# procps: sshd/cloudflared 的 pgrep、ps
+# dropbear-bin: 真正对外提供 SSH 的服务端。OpenSSH 9+ 的权限分离在认证前要
+#   chroot("/run/sshd")，而 orkestr 的容器没有 CAP_SYS_CHROOT，会直接断在
+#   preauth（现象：能拿到 banner、随后 Connection closed）。ChrootDirectory
+#   none 与 UsePrivilegeSeparation no 都绕不过。dropbear 不做这一步。
+# procps: pgrep、ps
 # tini: PID 1 收尸，magpie 和 cloudflared 都是子进程
-# 重试 + 走 https 源：orkestr 与本机都可能碰上首个镜像源瞬时不可达
+# apt 加重试：orkestr 与本机都可能碰上源瞬时不可达
 RUN for i in 1 2 3; do \
       apt-get update && break || sleep 3; \
     done \
  && apt-get install -y --no-install-recommends \
-      openssh-server openssh-client procps tini ca-certificates curl \
+      openssh-server openssh-client dropbear-bin procps tini ca-certificates curl \
  && rm -rf /var/lib/apt/lists/* \
  && mkdir -p /run/sshd /var/log
 
