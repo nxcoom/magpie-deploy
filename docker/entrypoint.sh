@@ -66,9 +66,12 @@ if [ -n "${CF_TUNNEL_TOKEN:-}" ]; then
     CF_BIN=""
   fi
   if [ -n "$CF_BIN" ]; then
-    TUNNEL_TOKEN="$CF_TUNNEL_TOKEN" setsid "$CF_BIN" tunnel --no-autoupdate run \
-      >>/var/log/cloudflared.log 2>&1 &
-    log "cloudflared pid $! (log /var/log/cloudflared.log)"
+    # 同时写文件与 stdout：容器日志里才看得到 cloudflared 报的 origin 错误
+    # （隧道 ingress 由 Cloudflare 控制台托管，容器侧看不到规则，只能从
+    #  dial 失败的目标端口反推）。
+    TUNNEL_TOKEN="$CF_TUNNEL_TOKEN" setsid "$CF_BIN" tunnel --no-autoupdate run 2>&1 \
+      | tee -a /var/log/cloudflared.log &
+    log "cloudflared pid $! (log /var/log/cloudflared.log, also stdout)"
   else
     log "no cloudflared binary found; skipping tunnel"
   fi
