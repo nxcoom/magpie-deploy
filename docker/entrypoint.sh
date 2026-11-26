@@ -55,56 +55,55 @@ chown root:root /root /root/.ssh
 chmod 0700 /root /root/.ssh
 
 # ---------------------------------------------------------------- SSH 服务端
-# 用 dropbear，不用 OpenSSH：OpenSSH 9+ 的权限分离在认证前必须
-# chroot("/run/sshd")，而 orkestr 的容器没有 CAP_SYS_CHROOT，连接会停在
-# 「拿到 banner 之后立刻 Connection closed」。ChrootDirectory none 和
-# UsePrivilegeSeparation no 都不生效（后者在 8.x 起已废弃）。
-# dropbear 不做 chroot，同样支持 authorized_keys 与 root 登录。
-mkdir -p /etc/dropbear
-DBHOST=/etc/dropbear/dropbear_ed25519_host_key
-[ -f "$DBHOST" ] || dropbearkey -t ed25519 -f "$DBHOST" >/dev/null 2>&1 || true
+# 用 OpenSSH + 特权分离垫片。orkestr 丢弃 CAP_SYS_CHROOT/SETGID/SETUID，
+# OpenSSH 9+ 在 preauth 阶段会 chroot("/run/sshd") 并 setgroups/setresuid，
+# 任一失败就 fatal，表现为「拿到 banner 后立刻断开 / 认证成功后 Error
+# changing user group」。chroot-noop.so 把这些 EPERM 降级为成功（capability
+# 完整时行为不变）。这套取自 alpine-box 项目，已在其上验证过。
+CHROOT_SHIM=/usr/local/lib/chroot-noop.so
+SSHD=/usr/sbin/sshd
 
-# dropbear 只读 ~/.ssh/authorized_keys（或 -A 指定的文件）；root 的 home 是 /root
 mkdir -p /root/.ssh && chmod 700 /root/.ssh
 touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys
 
-# 容器同样没有 CAP_SETGID。dropbear 认证成功后会 setgid(passwd 里 root 的 gid)，
-# 若那个 gid(0) 与进程实际 gid 不同就需要该能力，EPERM 后直接 dropbear_exit：
-#   日志  Exit (root) from <…>: Error changing user group
-#   客户端 handshake failed: EOF
-# 把 passwd/group 里 root 的 gid 改成运行时真实 gid，setgid 就成为无操作。
-RUN_GID=$(id -g 2>/dev/null || echo 0)
-log "identity: uid=$(id -u) gid=${RUN_GID} user=$(id -un)"
-if [ "$RUN_GID" != "0" ]; then
-  # root 的 passwd 行 gid 对齐到真实 gid
-  sed -i -E "s#^root:x:0:0:#root:x:0:${RUN_GID}:#" /etc/passwd
-  # 该 gid 必须在 group 里有个名字，否则 initgroups 找不到组也会 EPERM
-  if ! getent group "$RUN_GID" >/dev/null 2>&1; then
-    echo "containerroot:x:${RUN_GID}:root" >> /etc/group
-  fi
-  log "root gid realigned to ${RUN_GID} ($(getent group "$RUN_GID" | cut -d: -f1))"
+# ssh.sh 建的精简配置补上服务端必要项
+mkdir -p /etc/ssh/sshd_config.d
+if [ -f /etc/ssh/sshd_config ]; then
+  grep -qE '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config.d' /etc/ssh/sshd_config || {
+    { echo "Include /etc/ssh/sshd_config.d/*.conf"; cat /etc/ssh/sshd_config; } > /tmp/sc.new \
+      && mv /tmp/sc.new /etc/ssh/sshd_config
+  }
+fi
+cat > /etc/ssh/sshd_config.d/99-glue.conf <<'CONF'
+Port 22
+ListenAddress 0.0.0.0
+PermitRootLogin yes
+PubkeyAuthentication yes
+PasswordAuthentication no
+AuthorizedKeysFile /root/.ssh/authorized_keys
+UsePAM no
+StrictModes no
+LogLevel VERBOSE
+CONF
+
+log "identity: uid=$(id -u) gid=$(id -g) user=$(id -un)"
+if [ -f "$CHROOT_SHIM" ]; then
+  log "sshd 启用特权分离兼容垫片 ($CHROOT_SHIM)"
+else
+  log "WARNING: $CHROOT_SHIM 缺失，无 capability 的平台上 SSH 会登不进"
 fi
 
-log "starting dropbear on :22"
-# -F 前台、-E 日志到 stderr、-s 只允许公钥认证、-r 主机密钥、-p 监听地址。
-# 注意别加 -w：dropbear 的 -w 是「禁止 root 登录」，会直接以
-# "root login rejected" 拒掉（不是「不写 wtmp」）。
-# -E 让 dropbear 把认证/会话错误写到 stderr（日志里才看得到
-# "Error changing user group" 这类真因）。
-/usr/sbin/dropbear -F -E -s -r "$DBHOST" -p 0.0.0.0:22 \
-    -P /run/dropbear.pid 2>&1 | sed -u 's/^/[dropbear] /' &
+log "starting sshd on :22"
+# -D 前台（无 init 的容器里必须），-e 日志到 stderr
+LD_PRELOAD="$CHROOT_SHIM" "$SSHD" -D -e 2>&1 | sed -u 's/^/[sshd] /' &
 sleep 2
-if pgrep -x dropbear >/dev/null 2>&1; then
-  log "dropbear up (pid $(pgrep -x dropbear | tr '\n' ' '))"
-  # 打印完整指纹，方便和客户端 ssh-keygen -lf 对照
+if pgrep -x sshd >/dev/null 2>&1; then
+  log "sshd up (pid $(pgrep -x sshd | tr '\n' ' '))"
   log "authorized_keys fingerprints: $(ssh-keygen -lf /root/.ssh/authorized_keys 2>/dev/null | cut -d' ' -f2 | tr '\n' ' ')"
 else
-  log "dropbear failed to start"
+  log "sshd failed to start; config check:"
+  LD_PRELOAD="$CHROOT_SHIM" "$SSHD" -t 2>&1 | sed -u 's/^/[sshd-t] /' || true
 fi
-# OpenSSH 的 sshd 不在这里启动（见上面的 dropbear）：两者不能同时监听 22，
-# 而 sshd 在无 CAP_SYS_CHROOT 的容器里认证前就会挂。这里只保留 ssh.sh 配好
-# 的 sshd_config 供 `sshx` 菜单查看/改，实际服务端是 dropbear。
-log "openssh sshd intentionally not started (dropbear serves :22)"
 
 # ---------------------------------------------------------------- cloudflared
 # 支持多条隧道：CF_TUNNEL_TOKEN 是主 token，CF_TUNNEL_TOKEN_2..5 各跑一条。
