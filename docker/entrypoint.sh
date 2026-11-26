@@ -84,7 +84,8 @@ fi
 export MAGPIE_WEB_KEY
 
 if [ -n "${MAGPIE_GATEWAY_KEY:-}" ]; then
-  # 已有同名 key 时会报错，忽略即可
+  # magpie 只拒绝 sk-magpie- 开头（它会自己生成那种）；
+  # 同名 key 已存在时会报错，忽略即可
   magpie gateway-key add orkestr --key "$MAGPIE_GATEWAY_KEY" >/dev/null 2>&1 || true
 fi
 
