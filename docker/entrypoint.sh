@@ -37,14 +37,11 @@ chmod 600 /root/.ssh/authorized_keys
 # 主机密钥：镜像构建时可能已生成，容器若换了 rootfs 就再生成一遍
 ssh-keygen -A >/dev/null 2>&1 || true
 
-# cloudflared 的隧道要连本机 22：sshd 必须监听所有地址
+# 端口/监听地址只在 drop-in (99-glue.conf) 里声明一次。主配置里若也有
+# Port/ListenAddress，sshd 会逐条 bind，第一条成功后其余全报
+# "Address already in use"。所以这里把主配置里的都注释掉。
 if [ -f /etc/ssh/sshd_config ]; then
-  grep -qE '^[[:space:]]*Port[[:space:]]+22' /etc/ssh/sshd_config || echo "Port 22" >> /etc/ssh/sshd_config
-  grep -qE '^[[:space:]]*ListenAddress[[:space:]]+0\.0\.0\.0' /etc/ssh/sshd_config || echo "ListenAddress 0.0.0.0" >> /etc/ssh/sshd_config
-  # 隧道进来的是「外部」连接，root 登录与公钥都必须放开
-  sed -i -E 's/^[#[:space:]]*PermitRootLogin[[:space:]].*/PermitRootLogin yes/' /etc/ssh/sshd_config
-  grep -qE '^[[:space:]]*PermitRootLogin' /etc/ssh/sshd_config || echo "PermitRootLogin yes" >> /etc/ssh/sshd_config
-  grep -qE '^[[:space:]]*UsePAM[[:space:]]+no' /etc/ssh/sshd_config || echo "UsePAM no" >> /etc/ssh/sshd_config
+  sed -i -E 's/^[[:space:]]*(Port[[:space:]]|ListenAddress[[:space:]])/#\1/' /etc/ssh/sshd_config
 fi
 
 # 容器里 root 的 home 与权限都由我们自己铺；OpenSSH 的 StrictModes 属主检查
