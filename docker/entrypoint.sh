@@ -69,9 +69,10 @@ mkdir -p /root/.ssh && chmod 700 /root/.ssh
 touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys
 
 log "starting dropbear on :22"
-# -F 前台、-E 日志到 stderr、-s 禁密码、-w 不写 wtmp、-r 主机密钥、
-# -p 监听地址；日志同时进容器 stdout，认证问题只看容器日志就能定位。
-/usr/sbin/dropbear -F -E -s -w -r "$DBHOST" -p 0.0.0.0:22 \
+# -F 前台、-E 日志到 stderr、-s 只允许公钥认证、-r 主机密钥、-p 监听地址。
+# 注意别加 -w：dropbear 的 -w 是「禁止 root 登录」，会直接以
+# "root login rejected" 拒掉（不是「不写 wtmp」）。
+/usr/sbin/dropbear -F -E -s -r "$DBHOST" -p 0.0.0.0:22 \
     -P /run/dropbear.pid 2>&1 | sed -u 's/^/[dropbear] /' &
 sleep 2
 if pgrep -x dropbear >/dev/null 2>&1; then
