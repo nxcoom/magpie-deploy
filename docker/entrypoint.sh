@@ -68,10 +68,29 @@ DBHOST=/etc/dropbear/dropbear_ed25519_host_key
 mkdir -p /root/.ssh && chmod 700 /root/.ssh
 touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys
 
+# 容器同样没有 CAP_SETGID。dropbear 认证成功后会 setgid(passwd 里 root 的 gid)，
+# 若那个 gid(0) 与进程实际 gid 不同就需要该能力，EPERM 后直接 dropbear_exit：
+#   日志  Exit (root) from <…>: Error changing user group
+#   客户端 handshake failed: EOF
+# 把 passwd/group 里 root 的 gid 改成运行时真实 gid，setgid 就成为无操作。
+RUN_GID=$(id -g 2>/dev/null || echo 0)
+log "identity: uid=$(id -u) gid=${RUN_GID} user=$(id -un)"
+if [ "$RUN_GID" != "0" ]; then
+  # root 的 passwd 行 gid 对齐到真实 gid
+  sed -i -E "s#^root:x:0:0:#root:x:0:${RUN_GID}:#" /etc/passwd
+  # 该 gid 必须在 group 里有个名字，否则 initgroups 找不到组也会 EPERM
+  if ! getent group "$RUN_GID" >/dev/null 2>&1; then
+    echo "containerroot:x:${RUN_GID}:root" >> /etc/group
+  fi
+  log "root gid realigned to ${RUN_GID} ($(getent group "$RUN_GID" | cut -d: -f1))"
+fi
+
 log "starting dropbear on :22"
 # -F 前台、-E 日志到 stderr、-s 只允许公钥认证、-r 主机密钥、-p 监听地址。
 # 注意别加 -w：dropbear 的 -w 是「禁止 root 登录」，会直接以
 # "root login rejected" 拒掉（不是「不写 wtmp」）。
+# -E 让 dropbear 把认证/会话错误写到 stderr（日志里才看得到
+# "Error changing user group" 这类真因）。
 /usr/sbin/dropbear -F -E -s -r "$DBHOST" -p 0.0.0.0:22 \
     -P /run/dropbear.pid 2>&1 | sed -u 's/^/[dropbear] /' &
 sleep 2
