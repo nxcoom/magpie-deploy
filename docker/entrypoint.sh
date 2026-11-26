@@ -47,16 +47,50 @@ if [ -f /etc/ssh/sshd_config ]; then
   grep -qE '^[[:space:]]*UsePAM[[:space:]]+no' /etc/ssh/sshd_config || echo "UsePAM no" >> /etc/ssh/sshd_config
 fi
 
+# 容器里 root 的 home 与权限都由我们自己铺，StrictModes 的属主检查只会添乱
+# （base 镜像 ENV HOME=/config/home 与 passwd 里的 /root 不一致时尤其容易踩）；
+# 公钥路径写死，避免相对路径按 HOME 解析到别处。
+mkdir -p /run/sshd /var/empty /root/.ssh
+chmod 0755 /run/sshd /var/empty
+chown root:root /root /root/.ssh
+chmod 0700 /root /root/.ssh
+
+# 权限分离用户：sshd 在发完 banner 后 fork 到 privsep 用户，缺了它就会在
+# 认证之前直接断开（表现正是「连上、看到版本号、然后 Connection closed」）。
+id sshd >/dev/null 2>&1 || useradd -r -g nogroup -d /var/empty -s /usr/sbin/nologin sshd 2>/dev/null || true
+
+# sshd 取「第一次出现的值生效」，所以 drop-in 要在主配置的 Include 之后
+# 才被读到；ssh.sh 生成的精简配置里可能没有 Include，这里补在最前面。
+mkdir -p /etc/ssh/sshd_config.d
+if ! grep -qE '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config.d' /etc/ssh/sshd_config 2>/dev/null; then
+  { echo "Include /etc/ssh/sshd_config.d/*.conf"; cat /etc/ssh/sshd_config 2>/dev/null; } > /tmp/sshd_config.new \
+    && mv /tmp/sshd_config.new /etc/ssh/sshd_config
+fi
+
+cat > /etc/ssh/sshd_config.d/99-glue.conf <<'CONF'
+PermitRootLogin yes
+PubkeyAuthentication yes
+AuthorizedKeysFile /root/.ssh/authorized_keys
+StrictModes no
+UsePAM no
+LogLevel VERBOSE
+CONF
+
 log "starting sshd on :22"
 # -D 必须加：没有它 sshd 先 fork 再返回，本进程一退出 systemd 之外的
 # 容器里就跟着退；-e 让日志留在 stderr（-E 写文件也保留）。
-/usr/sbin/sshd -D -e -E /var/log/sshd.log &
+: > /var/log/sshd.log
+/usr/sbin/sshd -D -E /var/log/sshd.log &
+SSHD_PID=$!
+# sshd 的日志同时打到容器 stdout：认证类问题只看容器日志就能定位
+( tail -F /var/log/sshd.log 2>/dev/null | sed -u 's/^/[sshd] /' ) &
 sleep 2
-if ! pgrep -x sshd >/dev/null 2>&1; then
+if ! kill -0 "$SSHD_PID" 2>/dev/null; then
   log "sshd failed to start; tail:"
   tail -20 /var/log/sshd.log >&2 2>/dev/null || true
 else
-  log "sshd up (pid $(pgrep -x sshd | head -1))"
+  log "sshd up (pid $SSHD_PID)"
+  log "authorized_keys now: $(cut -d' ' -f1,3 /root/.ssh/authorized_keys 2>/dev/null | tr '\n' ' ')"
 fi
 
 # ---------------------------------------------------------------- cloudflared
